@@ -23,6 +23,7 @@ EXPECTED_TRAEFIK_CONFIG = {
                 "rule": "Host(`foo.bar/model-remote-0`)",
                 "service": "juju-remote-0-model-service",
                 "entryPoints": ["web"],
+                "middlewares": [],
             }
         },
         "services": {
@@ -30,6 +31,7 @@ EXPECTED_TRAEFIK_CONFIG = {
                 "loadBalancer": {"servers": [{"url": "http://foo.bar/model-remote-0"}]}
             }
         },
+        "middlewares": {},
     }
 }
 

@@ -5,12 +5,12 @@ import asyncio
 import contextlib
 import logging
 import os
-import textwrap
 from pathlib import Path
 
 import pytest
 import yaml
 from pytest_operator.plugin import OpsTest
+from tenacity import retry, stop_after_delay, wait_exponential
 
 from tests.integration.conftest import INGRESS_REQUIRER_MOCK_NAME, TRAEFIK_MOCK_NAME
 
@@ -127,20 +127,73 @@ async def test_relation_data(ops_test: OpsTest):
     unit_name = INGRESS_REQUIRER_MOCK_NAME + "-0"
     url = MOCK_ROOT_URL_TEMPLATE.replace("{{juju_unit}}", unit_name)
 
-    expected_config = textwrap.dedent(
-        f"""
-    http:
-      routers:
-        juju-{unit_name}-{model_name}-router:
-          entryPoints:
-          - web
-          rule: Host(`{unit_name}.foo`)
-          service: juju-{unit_name}-{model_name}-service
-      services:
-        juju-{unit_name}-{model_name}-service:
-          loadBalancer:
-            servers:
-            - url: {url}
-    """
-    )
-    assert config.strip() == expected_config.strip(), config
+    expected_config = {
+        "http": {
+            "routers": {
+                f"juju-{unit_name}-{model_name}-router": {
+                    "entryPoints": ["web"],
+                    "middlewares": [],
+                    "rule": f"Host(`{unit_name}.foo`)",
+                    "service": f"juju-{unit_name}-{model_name}-service",
+                }
+            },
+            "services": {
+                f"juju-{unit_name}-{model_name}-service": {
+                    "loadBalancer": {"servers": [{"url": url}]}
+                }
+            },
+            "middlewares": {},
+        }
+    }
+
+    assert yaml.safe_load(config) == expected_config, config
+
+
+async def test_configure_prefix_strip(ops_test: OpsTest):
+    strip_prefix = "bar"
+    # the root_url is http://{{juju_unit}}.foo/bar/
+
+    async with fast_forward(ops_test):
+        await ops_test.juju("config", APP_NAME, f"strip_prefix={strip_prefix}")
+
+    # we might need a bit of time for the config-changed event to be
+    # fired and processed. This might race and we have nothing tangible to await.
+    # Therefore:
+    @retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_delay(60 * 5))
+    async def _test_databag_contents():
+        traefik_unit = TRAEFIK_MOCK_NAME + "/0"
+        return_code, stdout, stderr = await ops_test.juju("show-unit", traefik_unit)
+        data = yaml.safe_load(stdout)
+        try:
+            config = data[traefik_unit]["relation-info"][0]["application-data"]["config"]
+        except Exception:
+            print(return_code, stdout, stderr, data)
+            raise
+
+        model_name = ops_test.model_name
+        unit_name = INGRESS_REQUIRER_MOCK_NAME + "-0"
+        url = MOCK_ROOT_URL_TEMPLATE.replace("{{juju_unit}}", unit_name)
+
+        expected_config = {
+            "http": {
+                "routers": {
+                    f"juju-{unit_name}-{model_name}-router": {
+                        "entryPoints": ["web"],
+                        "middlewares": [f"juju-{strip_prefix}-stripprefix"],
+                        "rule": f"Host(`{unit_name}.foo`)",
+                        "service": f"juju-{unit_name}-{model_name}-service",
+                    }
+                },
+                "services": {
+                    f"juju-{unit_name}-{model_name}-service": {
+                        "loadBalancer": {"servers": [{"url": url}]}
+                    }
+                },
+                "middlewares": {
+                    f"juju-{strip_prefix}-stripprefix": {"stripPrefix": {"prefixes": ["/bar"]}}
+                },
+            }
+        }
+        assert yaml.safe_load(config) == expected_config, config
+
+    await _test_databag_contents()
